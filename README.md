@@ -1,20 +1,88 @@
-## ELO Stats
-Built with [Vite](https://vitejs.dev/) + React
+# ELO Stats
+
+A lightweight **ELO rating tracker and visualizer** built with **React** and **Vite**. This project focuses on fast performance, clean UI, and straightforward state management for tracking player ratings over time.
 
 ![Powered by Vite](https://img.shields.io/badge/built%20with-vite-purple?logo=vite)
 
+---
 
+## Tech Stack
 
+* **React** – Component-based UI
+* **Vite** – Fast dev server and optimized builds
+* **JavaScript (ES6+)**
+* **ESLint** – Code quality and consistency
 
-# React + Vite
+---
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+## Features
 
-Currently, two official plugins are available:
+* Track ELO ratings for players
+* Update ratings based on match outcomes
+* Responsive, minimal UI
+* Fast hot-module reloading during development
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+---
 
-## Expanding the ESLint configuration
+## Getting Started
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+### Prerequisites
+
+* Node.js (v18+ recommended)
+* npm or yarn
+
+### Installation
+
+```bash
+npm install
+```
+
+### Run locally
+
+```bash
+npm run dev
+```
+
+### Build for production
+
+```bash
+npm run build
+```
+
+---
+
+## Project Structure
+
+```
+elo_stats/
+├── src/
+│   ├── components/
+│   ├── assets/
+│   ├── App.jsx
+│   └── main.jsx
+├── index.html
+└── vite.config.js
+```
+
+---
+
+## Notes
+
+* Built using the official **React + Vite** template
+* Designed as a learning-focused and extensible project
+* Easy to expand with persistence, charts, or backend integration
+
+---
+
+## Future Improvements
+
+* Persist ratings (localStorage or backend)
+* Match history view
+* Rating charts and analytics
+* TypeScript migration
+
+---
+
+## License
+
+MIT
