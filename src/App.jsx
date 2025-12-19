@@ -24,7 +24,6 @@ function App() {
         <div className="refresh-icon">🔄</div>
         <div className="date-display">Date<br />00/00/0000</div>
 
-        
       </div>
 
       <div className="main-content">
