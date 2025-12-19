@@ -82,7 +82,3 @@ elo_stats/
 * TypeScript migration
 
 ---
-
-## License
-
-MIT
