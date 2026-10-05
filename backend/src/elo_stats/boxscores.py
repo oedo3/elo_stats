@@ -7,7 +7,6 @@ same shape as ``leaguegamelog`` rows so both paths share one storage format.
 
 from __future__ import annotations
 
-from datetime import date
 from typing import Any
 
 from elo_stats.nba_client import Row
@@ -16,14 +15,17 @@ GAME_ID_PREFIX = {"Regular Season": "002", "Playoffs": "004"}
 FINAL_STATUS = 3
 
 
-def scheduled_games(schedule: list[Row], season_type: str, today: date) -> list[Row]:
-    """Games of ``season_type`` that have been played (final, or dated before today)."""
+def scheduled_games(schedule: list[Row], season_type: str) -> list[Row]:
+    """Final games of ``season_type``.
+
+    Only final games count: schedules also list placeholders for "if necessary" playoff games
+    that were never played, which have no box score.
+    """
     prefix = GAME_ID_PREFIX[season_type]
     return [
         game
         for game in schedule
-        if game["game_id"].startswith(prefix)
-        and (game["status"] == FINAL_STATUS or game["game_date"] < today.isoformat())
+        if game["game_id"].startswith(prefix) and game["status"] == FINAL_STATUS
     ]
 
 

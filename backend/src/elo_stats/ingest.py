@@ -140,7 +140,6 @@ def fetch_via_box_scores(
     client: NbaClient,
     season: int,
     season_type: str,
-    today: date,
     workers: int,
 ) -> int:
     """Download every played game of a season one box score at a time.
@@ -149,7 +148,7 @@ def fetch_via_box_scores(
     interrupted run resumes where it stopped. Returns how many games could not be fetched.
     """
     label = season_label(season)
-    games = scheduled_games(client.season_schedule(label), season_type, today)
+    games = scheduled_games(client.season_schedule(label), season_type)
     done = {
         r[0]
         for r in conn.execute(
@@ -190,7 +189,6 @@ def _fetch_one(
     client: NbaClient,
     season: int,
     season_type: str,
-    today: date,
     options: FetchOptions,
 ) -> bool:
     """Fetch one season type, bulk first then box scores. Returns True when complete."""
@@ -204,7 +202,7 @@ def _fetch_one(
             store_game_logs(conn, rows, season, season_type)
             conn.commit()
             return True
-    return fetch_via_box_scores(conn, client, season, season_type, today, options.workers) == 0
+    return fetch_via_box_scores(conn, client, season, season_type, options.workers) == 0
 
 
 def fetch_seasons(
@@ -243,7 +241,7 @@ def fetch_seasons(
                 continue
             logger.info("Fetching %s %s ...", label, season_type)
             try:
-                complete = _fetch_one(conn, client, season, season_type, today, options)
+                complete = _fetch_one(conn, client, season, season_type, options)
             except NbaApiError as exc:  # e.g. the schedule itself could not be loaded
                 conn.commit()
                 logger.error("  %s %s incomplete: %s", label, season_type, exc)
