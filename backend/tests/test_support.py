@@ -49,14 +49,46 @@ class TestClientRetries:
         with pytest.raises(NbaApiError, match="after 2 attempts"):
             client._call("test", fetch)
 
-    def test_busy_client_fails_fast(self):
-        client = NbaStatsClient(min_interval=0, lock_timeout=0.01)
-        client._lock.acquire()
-        try:
-            with pytest.raises(NbaApiError, match="busy"):
-                client._call("test", lambda _a: {})
-        finally:
-            client._lock.release()
+    def test_paces_request_starts_across_threads(self):
+        now = [100.0]
+        sleeps: list[float] = []
+
+        def sleep(seconds):
+            sleeps.append(round(seconds, 3))
+
+        client = NbaStatsClient(min_interval=0.5, sleep=sleep, clock=lambda: now[0])
+        ok_payload = {"resultSets": [{"name": "A", "headers": [], "rowSet": []}]}
+        for _ in range(3):
+            client._call("test", lambda _a: ok_payload)
+        assert sleeps == [0.5, 1.0]
+
+    def test_circuit_breaker_pauses_everyone_then_resets(self):
+        now = [0.0]
+        sleeps: list[float] = []
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            now[0] += seconds
+
+        client = NbaStatsClient(
+            min_interval=0,
+            max_retries=1,
+            sleep=sleep,
+            clock=lambda: now[0],
+            breaker_threshold=2,
+            cooldown=300,
+        )
+
+        def failing(_attempt):
+            raise ValueError("empty body")
+
+        for _ in range(2):
+            with pytest.raises(NbaApiError):
+                client._call("test", failing)
+        ok_payload = {"resultSets": [{"name": "A", "headers": [], "rowSet": []}]}
+        client._call("test", lambda _a: ok_payload)
+        assert sleeps == [300]
+        assert client._cooldown == 300  # reset after a success
 
     def test_malformed_payload_is_an_api_error(self):
         client = NbaStatsClient(min_interval=0, max_retries=1, sleep=lambda _s: None)

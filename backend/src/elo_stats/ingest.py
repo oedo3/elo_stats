@@ -16,10 +16,12 @@ import logging
 import math
 import sqlite3
 from collections.abc import Iterable, Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 from typing import Any
 
+from elo_stats.boxscores import box_score_rows, scheduled_games
 from elo_stats.config import FIRST_SEASON, SEASON_TYPES, load_settings
 from elo_stats.db import open_db
 from elo_stats.elo import EloParams, Game, PlayerLine, RatingUpdate, TeamSide, run_elo
@@ -107,72 +109,102 @@ def store_game_logs(
     return len(parsed)
 
 
-def month_windows(season_start: int, season_type: str) -> list[tuple[date, date]]:
-    """Calendar-month date windows that cover every possible game of a season type.
+def season_bounds(season_start: int, season_type: str) -> tuple[date, date]:
+    """Earliest and latest dates a season type's games can fall on.
 
     Regular seasons have run as late as August (2020 bubble); playoffs as late as October.
     """
     if season_type == "Playoffs":
-        first, last = date(season_start + 1, 4, 1), date(season_start + 1, 10, 31)
-    else:
-        first, last = date(season_start, 10, 1), date(season_start + 1, 8, 31)
-    windows = []
-    cursor = first
-    while cursor <= last:
-        next_month = date(cursor.year + cursor.month // 12, cursor.month % 12 + 1, 1)
-        windows.append((cursor, min(next_month - timedelta(days=1), last)))
-        cursor = next_month
-    return windows
-
-
-MIN_WINDOW_DAYS = 2
-
-
-def fetch_window(
-    client: NbaClient, label: str, season_type: str, date_from: date, date_to: date
-) -> list[Row]:
-    """Fetch a date window, halving it on failure until it is ``MIN_WINDOW_DAYS`` long."""
-    try:
-        rows = client.player_game_logs(
-            label, season_type, date_from=date_from, date_to=date_to, retries=2
-        )
-    except NbaApiError:
-        if (date_to - date_from).days < MIN_WINDOW_DAYS:
-            raise
-        middle = date_from + (date_to - date_from) // 2
-        logger.info("    splitting %s..%s", date_from, date_to)
-        return fetch_window(client, label, season_type, date_from, middle) + fetch_window(
-            client, label, season_type, middle + timedelta(days=1), date_to
-        )
-    logger.info("    %s..%s: %d rows", date_from, date_to, len(rows))
-    return rows
+        return date(season_start + 1, 4, 1), date(season_start + 1, 10, 31)
+    return date(season_start, 10, 1), date(season_start + 1, 8, 31)
 
 
 def has_started(season_start: int, season_type: str, today: date) -> bool:
     """False for season types that cannot have games yet (e.g. playoffs before April)."""
-    return month_windows(season_start, season_type)[0][0] <= today
+    return season_bounds(season_start, season_type)[0] <= today
 
 
-def fetch_season_rows(
-    client: NbaClient, season_start: int, season_type: str, today: date | None = None
-) -> list[Row]:
-    """Fetch a whole season in one request, falling back to smaller date windows.
+@dataclass(frozen=True)
+class FetchOptions:
+    # Request start rate is capped by the client; extra workers only stop slow responses
+    # from holding up the queue.
+    workers: int = 6
+    # The bulk endpoint returns a whole season in seconds when it works, but often times out
+    # (~30s per attempt). Box scores are the slow, reliable fallback.
+    try_bulk: bool = True
+    bulk_attempts: int = 2
 
-    stats.nba.com times out (HTTP 500 after ~30s) on large requests for older seasons, while
-    smaller date windows succeed.
+
+def fetch_via_box_scores(
+    conn: sqlite3.Connection,
+    client: NbaClient,
+    season: int,
+    season_type: str,
+    today: date,
+    workers: int,
+) -> int:
+    """Download every played game of a season one box score at a time.
+
+    Each game is stored (and recorded in ``fetched_games``) as soon as it arrives, so an
+    interrupted run resumes where it stopped. Returns how many games could not be fetched.
     """
-    label = season_label(season_start)
-    try:
-        return client.player_game_logs(label, season_type, retries=2)
-    except NbaApiError:
-        logger.info("  full season failed; fetching %s %s by month", label, season_type)
-    today = today or date.today()
-    rows: list[Row] = []
-    for date_from, date_to in month_windows(season_start, season_type):
-        if date_from > today:
-            break
-        rows.extend(fetch_window(client, label, season_type, date_from, date_to))
-    return rows
+    label = season_label(season)
+    games = scheduled_games(client.season_schedule(label), season_type, today)
+    done = {
+        r[0]
+        for r in conn.execute(
+            "SELECT game_id FROM fetched_games WHERE season = ? AND season_type = ?",
+            (label, season_type),
+        )
+    }
+    todo = [g for g in games if g["game_id"] not in done]
+    logger.info(
+        "  %d games scheduled, %d already stored, %d to fetch", len(games), len(done), len(todo)
+    )
+
+    failures = 0
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(client.box_score, g["game_id"]): g for g in todo}
+        for count, future in enumerate(as_completed(futures), start=1):
+            game = futures[future]
+            try:
+                rows = box_score_rows(future.result(), game["game_date"])
+            except NbaApiError as exc:
+                failures += 1
+                logger.warning("    %s: %s", game["game_id"], exc)
+                continue
+            store_game_logs(conn, rows, season, season_type)
+            conn.execute(
+                "INSERT OR REPLACE INTO fetched_games VALUES (?, ?, ?, ?, ?)",
+                (game["game_id"], label, season_type, len(rows), _now()),
+            )
+            if count % 100 == 0:
+                conn.commit()
+                logger.info("    %d/%d games", count, len(todo))
+    conn.commit()
+    return failures
+
+
+def _fetch_one(
+    conn: sqlite3.Connection,
+    client: NbaClient,
+    season: int,
+    season_type: str,
+    today: date,
+    options: FetchOptions,
+) -> bool:
+    """Fetch one season type, bulk first then box scores. Returns True when complete."""
+    label = season_label(season)
+    if options.try_bulk:
+        try:
+            rows = client.player_game_logs(label, season_type, retries=options.bulk_attempts)
+        except NbaApiError:
+            logger.info("  bulk endpoint failed; using per-game box scores")
+        else:
+            store_game_logs(conn, rows, season, season_type)
+            conn.commit()
+            return True
+    return fetch_via_box_scores(conn, client, season, season_type, today, options.workers) == 0
 
 
 def fetch_seasons(
@@ -184,13 +216,16 @@ def fetch_seasons(
     refresh: bool = False,
     live_season: int | None = None,
     today: date | None = None,
+    options: FetchOptions | None = None,
 ) -> list[str]:
-    """Download each (season, type) not already cached; the live season is always re-fetched.
+    """Download each (season, type) not already complete; the live season is always re-fetched.
 
-    A season that cannot be downloaded is rolled back and skipped so one bad season does not
-    stop the run. Returns the ``"<season> <type>"`` labels that failed.
+    A season that cannot be fully downloaded keeps whatever games did arrive and is reported,
+    so one bad season does not stop the run. Returns the ``"<season> <type>"`` labels that
+    are still incomplete.
     """
     today = today or date.today()
+    options = options or FetchOptions()
     cached = _cached_seasons(conn)
     failed: list[str] = []
     for season in seasons:
@@ -208,19 +243,24 @@ def fetch_seasons(
                 continue
             logger.info("Fetching %s %s ...", label, season_type)
             try:
-                rows = fetch_season_rows(client, season, season_type, today)
-            except NbaApiError as exc:
-                conn.rollback()
-                logger.error("  skipped %s %s: %s", label, season_type, exc)
+                complete = _fetch_one(conn, client, season, season_type, today, options)
+            except NbaApiError as exc:  # e.g. the schedule itself could not be loaded
+                conn.commit()
+                logger.error("  %s %s incomplete: %s", label, season_type, exc)
+                complete = False
+            if not complete:
                 failed.append(f"{label} {season_type}")
                 continue
-            stored = store_game_logs(conn, rows, season, season_type)
+            stored = conn.execute(
+                "SELECT COUNT(*) FROM player_games WHERE season = ? AND season_type = ?",
+                (season, season_type),
+            ).fetchone()[0]
             conn.execute(
                 "INSERT OR REPLACE INTO fetched_seasons VALUES (?, ?, ?, ?)",
                 (label, season_type, stored, _now()),
             )
             conn.commit()
-            logger.info("  stored %d player-game rows", stored)
+            logger.info("  complete: %d player-game rows", stored)
     return failed
 
 
@@ -248,7 +288,7 @@ def _is_complete(record: _FetchRecord | None, season: int, season_type: str) -> 
     """
     if record is None or record.row_count == 0:
         return False
-    return record.fetched_on > month_windows(season, season_type)[-1][1]
+    return record.fetched_on > season_bounds(season, season_type)[1]
 
 
 def missing_seasons(
@@ -449,31 +489,67 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument("--to-season", type=int, default=live, help="start year (inclusive)")
     parser.add_argument("--refresh", action="store_true", help="re-download cached seasons")
     parser.add_argument("--skip-fetch", action="store_true", help="only recompute Elo")
+    parser.add_argument(
+        "--workers", type=int, default=6, help="parallel box score downloads (1-16, default 6)"
+    )
+    parser.add_argument(
+        "--no-bulk",
+        action="store_true",
+        help="skip the bulk game-log endpoint and download box scores only",
+    )
+    parser.add_argument(
+        "--rate", type=float, default=1.5, help="max requests started per second (default 1.5)"
+    )
+    parser.add_argument(
+        "--passes", type=int, default=3, help="retry rounds for incomplete seasons (default 3)"
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
     if not FIRST_SEASON <= args.from_season <= args.to_season <= live:
         parser.error(f"seasons must satisfy {FIRST_SEASON} <= from <= to <= {live}")
+    if not 1 <= args.workers <= 16:
+        parser.error("--workers must be between 1 and 16")
+    if not 0.2 <= args.rate <= 10:
+        parser.error("--rate must be between 0.2 and 10")
+    if not 1 <= args.passes <= 10:
+        parser.error("--passes must be between 1 and 10")
     return args
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
+    settings = load_settings()
+    settings.db_path.parent.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(settings.db_path.parent / "ingest.log", encoding="utf-8"),
+        ],
     )
-    settings = load_settings()
     live = current_season_start(date.today())
     with open_db(settings.db_path) as conn:
         if not args.skip_fetch:
             # Newest first: recent seasons are fast to fetch, so the app is useful sooner.
-            fetch_seasons(
-                conn,
-                NbaStatsClient(timeout=settings.nba_timeout_seconds),
-                range(args.to_season, args.from_season - 1, -1),
-                refresh=args.refresh,
-                live_season=live,
+            client = NbaStatsClient(
+                timeout=settings.nba_timeout_seconds, min_interval=1 / args.rate
             )
+            options = FetchOptions(workers=args.workers, try_bulk=not args.no_bulk)
+            seasons = list(range(args.to_season, args.from_season - 1, -1))
+            for attempt in range(1, args.passes + 1):
+                failed = fetch_seasons(
+                    conn,
+                    client,
+                    seasons,
+                    refresh=args.refresh and attempt == 1,
+                    live_season=live,
+                    options=options,
+                )
+                if not failed:
+                    break
+                logger.warning("Pass %d left %d season downloads incomplete", attempt, len(failed))
+                seasons = sorted({int(label[:4]) for label in failed}, reverse=True)
         logger.info("Computing Elo ...")
         rated = compute_ratings(conn, settings.elo)
         missing = missing_seasons(conn, range(FIRST_SEASON, live + 1))

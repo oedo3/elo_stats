@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from datetime import date
 from pathlib import Path
 
 import pytest
@@ -120,28 +119,67 @@ SEASON_TOTALS = {
 }
 
 
+def to_box_score(game_id: str, rows: list[dict]) -> dict:
+    """Build a boxscoretraditionalv3-shaped game from leaguegamelog-shaped fixture rows."""
+    teams: dict[str, dict] = {}
+    for row in rows:
+        side = "homeTeam" if " vs. " in row["MATCHUP"] else "awayTeam"
+        team = teams.setdefault(
+            side,
+            {
+                "teamId": row["TEAM_ID"],
+                "teamTricode": row["TEAM_ABBREVIATION"],
+                "statistics": {"points": 0},
+                "players": [],
+            },
+        )
+        team["statistics"]["points"] += row["PTS"]
+        first, _, last = row["PLAYER_NAME"].partition(" ")
+        team["players"].append(
+            {
+                "personId": row["PLAYER_ID"],
+                "firstName": first,
+                "familyName": last,
+                "statistics": {
+                    "minutes": f"{row['MIN']}:00",
+                    "points": row["PTS"],
+                    "reboundsTotal": row["REB"],
+                    "assists": row["AST"],
+                    "plusMinusPoints": float(row["PLUS_MINUS"]),
+                },
+            }
+        )
+    return {"gameId": game_id, **teams}
+
+
 class FakeClient:
-    def __init__(
-        self, rows_by_season=None, fail_full_season=False, fail_info=False, max_window_days=None
-    ):
+    def __init__(self, rows_by_season=None, fail_full_season=False, fail_info=False, fail_games=()):
         self.rows_by_season = rows_by_season or {}
         self.fail_full_season = fail_full_season
-        self.max_window_days = max_window_days
+        self.fail_games = set(fail_games)
         self.fail_info = fail_info
         self.calls: list[tuple] = []
 
-    def player_game_logs(self, season, season_type, date_from=None, date_to=None, retries=None):
-        self.calls.append(("logs", season, season_type, date_from, date_to))
-        if season_type != "Regular Season":
-            return []
-        rows = self.rows_by_season.get(int(season[:4]), [])
-        if date_from is None:
-            if self.fail_full_season:
-                raise NbaApiError("boom")
-            return rows
-        if self.max_window_days is not None and (date_to - date_from).days > self.max_window_days:
-            raise NbaApiError("window too large")
-        return [r for r in rows if date_from <= date.fromisoformat(r["GAME_DATE"]) <= date_to]
+    def _rows(self, season: str) -> list[dict]:
+        return self.rows_by_season.get(int(season[:4]), [])
+
+    def player_game_logs(self, season, season_type, retries=None):
+        self.calls.append(("logs", season, season_type))
+        if self.fail_full_season:
+            raise NbaApiError("boom")
+        return self._rows(season) if season_type == "Regular Season" else []
+
+    def season_schedule(self, season):
+        self.calls.append(("schedule", season))
+        games = {r["GAME_ID"]: r["GAME_DATE"] for r in self._rows(season)}
+        return [{"game_id": g, "game_date": d, "status": 3} for g, d in games.items()]
+
+    def box_score(self, game_id):
+        self.calls.append(("box", game_id))
+        if game_id in self.fail_games:
+            raise NbaApiError("box score down")
+        rows = [r for rs in self.rows_by_season.values() for r in rs if r["GAME_ID"] == game_id]
+        return to_box_score(game_id, rows)
 
     def player_info(self, player_id):
         self.calls.append(("info", player_id))

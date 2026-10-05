@@ -53,13 +53,19 @@ python -m elo_stats.ingest
 ```
 
 - Seasons are fetched **newest first**, so recent data is usable quickly.
-- stats.nba.com is slow and often times out on older seasons. The downloader retries, then splits
-  the request into monthly and smaller date windows. The first full run can take a long time.
-- A season that still fails is skipped and listed at the end. The exit code is `2`, and the app
-  shows a "ratings are provisional" note. **Re-run the same command** to fill gaps; cached seasons
-  are not downloaded again.
-- `--skip-fetch` recomputes Elo from cached data, `--refresh` re-downloads everything, and
-  `--from-season` / `--to-season` limit the range.
+- Each season is first requested in one bulk call, which takes seconds when stats.nba.com is
+  healthy. If that call times out (it often does), the downloader reads the season schedule and
+  fetches **every game's box score** instead, about 1,300 requests per season. Each game is saved
+  as it arrives, so an interrupted run resumes where it stopped.
+- Requests are paced (`--rate`, default 1.5 per second, `--workers` in parallel). If the site
+  starts failing everything, which is how it throttles heavy clients, the downloader pauses for 5
+  minutes (doubling up to 30) before continuing.
+- Incomplete seasons are retried automatically (`--passes`, default 3). Anything still missing
+  is listed at the end, the exit code is `2`, and the app shows a "ratings are provisional" note.
+  **Re-run the same command** to fill gaps; completed seasons are never downloaded again.
+- Progress is logged to the terminal and to `backend/data/ingest.log`.
+- `--skip-fetch` recomputes Elo from cached data, `--refresh` re-downloads everything,
+  `--no-bulk` uses box scores only, and `--from-season` / `--to-season` limit the range.
 
 Start the API:
 

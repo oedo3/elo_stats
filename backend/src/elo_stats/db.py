@@ -16,6 +16,15 @@ CREATE TABLE IF NOT EXISTS fetched_seasons (
     PRIMARY KEY (season, season_type)
 );
 
+CREATE TABLE IF NOT EXISTS fetched_games (
+    game_id      TEXT PRIMARY KEY,
+    season       TEXT NOT NULL,
+    season_type  TEXT NOT NULL,
+    row_count    INTEGER NOT NULL,
+    fetched_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_fetched_games_season ON fetched_games (season, season_type);
+
 CREATE TABLE IF NOT EXISTS player_games (
     game_id      TEXT NOT NULL,
     player_id    INTEGER NOT NULL,

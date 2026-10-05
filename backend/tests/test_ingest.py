@@ -6,20 +6,20 @@ import pytest
 from elo_stats.db import open_db
 from elo_stats.elo import EloParams
 from elo_stats.ingest import (
+    FetchOptions,
     compute_ratings,
     current_season_start,
-    fetch_season_rows,
     fetch_seasons,
+    has_started,
     load_games,
     missing_seasons,
-    month_windows,
     parse_game_log_row,
     parse_minutes,
     record_missing,
+    season_bounds,
     season_label,
     store_game_logs,
 )
-from elo_stats.nba_client import NbaApiError
 from elo_stats.text import normalize_name
 from tests.conftest import FakeClient, all_rows_by_season, log_row
 
@@ -80,55 +80,83 @@ class TestParseRow:
         assert parse_game_log_row(row, 2023, "Regular Season") is None
 
 
-class TestMonthWindows:
-    def test_regular_season_covers_october_to_august(self):
-        windows = month_windows(2019, "Regular Season")
-        assert windows[0] == (date(2019, 10, 1), date(2019, 10, 31))
-        assert windows[-1] == (date(2020, 8, 1), date(2020, 8, 31))
-        assert len(windows) == 11
+class TestSeasonBounds:
+    def test_regular_season_runs_october_to_august(self):
+        assert season_bounds(2019, "Regular Season") == (date(2019, 10, 1), date(2020, 8, 31))
 
-    def test_playoffs_cover_april_to_october(self):
-        windows = month_windows(2019, "Playoffs")
-        assert windows[0][0] == date(2020, 4, 1)
-        assert windows[-1][1] == date(2020, 10, 31)
+    def test_playoffs_run_april_to_october(self):
+        assert season_bounds(2019, "Playoffs") == (date(2020, 4, 1), date(2020, 10, 31))
 
-    def test_windows_are_contiguous(self):
-        windows = month_windows(2023, "Regular Season")
-        for (_, end), (start, _) in zip(windows, windows[1:], strict=False):
-            assert (start - end).days == 1
+    def test_has_started(self):
+        assert has_started(2026, "Regular Season", date(2026, 10, 4))
+        assert not has_started(2026, "Playoffs", date(2026, 10, 4))
+
+
+REGULAR = ["Regular Season"]
 
 
 class TestFetch:
-    def test_falls_back_to_monthly_windows(self):
+    def test_uses_bulk_endpoint_when_it_works(self, tmp_path):
+        client = FakeClient(all_rows_by_season())
+        with open_db(tmp_path / "db.sqlite3") as conn:
+            assert fetch_seasons(conn, client, [2023], REGULAR) == []
+            stored = conn.execute("SELECT COUNT(*) FROM player_games").fetchone()[0]
+        assert stored == len(all_rows_by_season()[2023])
+        assert [c[0] for c in client.calls] == ["logs"]
+
+    def test_falls_back_to_box_scores(self, tmp_path):
         client = FakeClient(all_rows_by_season(), fail_full_season=True)
-        rows = fetch_season_rows(client, 2023, "Regular Season")
-        assert len(rows) == len(all_rows_by_season()[2023])
-        assert any(call[3] is not None for call in client.calls)
+        with open_db(tmp_path / "db.sqlite3") as conn:
+            assert fetch_seasons(conn, client, [2023], REGULAR) == []
+            rows = conn.execute(
+                "SELECT game_id, player_id, is_home, won, minutes, pts FROM player_games"
+                " ORDER BY game_id, player_id"
+            ).fetchall()
+            complete = conn.execute("SELECT row_count FROM fetched_seasons").fetchone()[0]
+        expected = sorted(
+            (
+                r["GAME_ID"],
+                r["PLAYER_ID"],
+                int(" vs. " in r["MATCHUP"]),
+                int(r["WL"] == "W"),
+                float(r["MIN"]),
+                r["PTS"],
+            )
+            for r in all_rows_by_season()[2023]
+        )
+        assert [tuple(r) for r in rows] == expected
+        assert complete == len(expected)
+        assert {c[0] for c in client.calls} == {"logs", "schedule", "box"}
 
-    def test_splits_windows_that_keep_failing(self):
-        client = FakeClient(all_rows_by_season(), fail_full_season=True, max_window_days=6)
-        rows = fetch_season_rows(client, 2023, "Regular Season")
-        assert len(rows) == len(all_rows_by_season()[2023])
-        assert any(c[3] is not None and (c[4] - c[3]).days <= 6 for c in client.calls)
+    def test_box_score_progress_survives_failures(self, tmp_path):
+        rows = all_rows_by_season()
+        flaky = FakeClient(rows, fail_full_season=True, fail_games={"0022300002"})
+        with open_db(tmp_path / "db.sqlite3") as conn:
+            assert fetch_seasons(conn, flaky, [2023], REGULAR) == ["2023-24 Regular Season"]
+            assert (
+                conn.execute("SELECT COUNT(DISTINCT game_id) FROM player_games").fetchone()[0] == 1
+            )
+            assert missing_seasons(conn, [2023], REGULAR) == ["2023-24 Regular Season"]
 
-    def test_gives_up_when_window_cannot_shrink(self):
-        client = FakeClient(all_rows_by_season(), fail_full_season=True, max_window_days=0)
-        with pytest.raises(NbaApiError):
-            fetch_season_rows(client, 2023, "Regular Season")
+            healthy = FakeClient(rows, fail_full_season=True)
+            assert fetch_seasons(conn, healthy, [2023], REGULAR) == []
+            assert [c[1] for c in healthy.calls if c[0] == "box"] == ["0022300002"]
+            assert missing_seasons(conn, [2023], REGULAR) == []
+
+    def test_box_scores_only_option(self, tmp_path):
+        client = FakeClient(all_rows_by_season())
+        with open_db(tmp_path / "db.sqlite3") as conn:
+            fetch_seasons(conn, client, [2023], REGULAR, options=FetchOptions(try_bulk=False))
+        assert "logs" not in {c[0] for c in client.calls}
 
     def test_skips_cached_seasons_but_refetches_live(self, tmp_path):
         client = FakeClient(all_rows_by_season())
         with open_db(tmp_path / "db.sqlite3") as conn:
-            fetch_seasons(conn, client, [2023, 2024], ["Regular Season"], live_season=2024)
+            fetch_seasons(conn, client, [2023, 2024], REGULAR, live_season=2024)
             first_calls = len(client.calls)
-            fetch_seasons(conn, client, [2023, 2024], ["Regular Season"], live_season=2024)
+            fetch_seasons(conn, client, [2023, 2024], REGULAR, live_season=2024)
             second_calls = client.calls[first_calls:]
         assert {c[1] for c in second_calls} == {"2024-25"}
-
-    def test_does_not_request_future_windows(self):
-        client = FakeClient(all_rows_by_season(), fail_full_season=True)
-        fetch_season_rows(client, 2023, "Regular Season", today=date(2023, 12, 15))
-        assert max(c[3] for c in client.calls if c[3] is not None) == date(2023, 12, 1)
 
     def test_skips_season_types_that_have_not_started(self, tmp_path):
         client = FakeClient(all_rows_by_season())
@@ -139,7 +167,8 @@ class TestFetch:
             assert missing_seasons(conn, [2026], today=date(2026, 10, 4)) == []
 
     def test_failed_season_is_skipped_and_reported(self, tmp_path):
-        client = FakeClient(all_rows_by_season(), fail_full_season=True, max_window_days=0)
+        all_games = {r["GAME_ID"] for r in all_rows_by_season()[2023]}
+        client = FakeClient(all_rows_by_season(), fail_full_season=True, fail_games=all_games)
         with open_db(tmp_path / "db.sqlite3") as conn:
             failed = fetch_seasons(conn, client, [2023], ["Regular Season"])
             assert failed == ["2023-24 Regular Season"]
