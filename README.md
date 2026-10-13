@@ -3,6 +3,23 @@
 Game-by-game **Elo ratings for every NBA player since 1996-97**, with player profiles, career
 stats and an interactive rating history.
 
+
+<img width="1900" height="986" alt="image" src="https://github.com/user-attachments/assets/6ecd0abd-b71b-4491-a6cb-d785ca429a8e" />
+
+<img width="1906" height="992" alt="image" src="https://github.com/user-attachments/assets/d602c30e-bfa1-4cf9-9073-78981535e153" />
+
+<img width="1900" height="986" alt="image" src="https://github.com/user-attachments/assets/b9ec817f-c849-4d11-8c84-c735499dd070" />
+
+
+
+
+
+
+
+
+
+
+
 - **Backend:** Python, FastAPI, SQLite, [`nba_api`](https://github.com/swar/nba_api)
 - **Frontend:** React 19, TypeScript, Vite, TanStack Query, Recharts
 
