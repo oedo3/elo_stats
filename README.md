@@ -15,11 +15,6 @@ stats and an interactive rating history.
 
 
 
-
-
-
-
-
 - **Backend:** Python, FastAPI, SQLite, [`nba_api`](https://github.com/swar/nba_api)
 - **Frontend:** React 19, TypeScript, Vite, TanStack Query, Recharts
 
@@ -175,7 +170,10 @@ elo_stats/
 ```
 
 ## Known limitations
-
+- The Elo system is heavily influenced by team strength rather than individual performance.
+Ratings move only with wins and losses, and every player on the floor shares their team’s
+result, scaled by minutes played. Role players on great teams can therefore outrank stars on
+weak teams, and teammates with similar minutes end up with similar ratings.
 - Ratings start in 1996-97. Players whose careers began earlier start that season at 1500.
 - PER and Win Shares are not in the public stats.nba.com endpoints used here, so the stats table
   shows eFG% and TS% instead.
