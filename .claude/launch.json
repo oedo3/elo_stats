@@ -1,0 +1,47 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "api",
+      "runtimeExecutable": "backend/.venv/Scripts/python.exe",
+      "runtimeArgs": [
+        "-m",
+        "uvicorn",
+        "elo_stats.api:create_app",
+        "--factory",
+        "--app-dir",
+        "backend/src",
+        "--port",
+        "8000"
+      ],
+      "port": 8000
+    },
+    {
+      "name": "web",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "run",
+        "dev"
+      ],
+      "port": 5173
+    },
+    {
+      "name": "api-preview",
+      "runtimeExecutable": "backend/.venv/Scripts/python.exe",
+      "runtimeArgs": [
+        "-m",
+        "uvicorn",
+        "elo_stats.api:create_app",
+        "--factory",
+        "--app-dir",
+        "backend/src",
+        "--port",
+        "8000"
+      ],
+      "env": {
+        "ELO_STATS_DB": "backend/data/preview/preview.sqlite3"
+      },
+      "port": 8000
+    }
+  ]
+}
